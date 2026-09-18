@@ -600,6 +600,110 @@ describe("trusted Codex task environment continuity", () => {
     });
   });
 
+  // Codex appends a date-rollover environment delta to the END of the input once the calendar date
+  // changes mid-turn, after the current turn's tool rounds, and that delta omits <cwd> and <shell>.
+  // Observed on 2026-09-19 00:00:00 for thread 01a0b523-5218-74b3-a033-a55c2eb15db3 turn
+  // 01a0b535-0acd-7423-95c3-eb0ba751395f, whose 191st item was exactly this envelope; the thread's
+  // cached authority was still valid 7s earlier.
+  const dateRolloverEnvironmentXml = `<environment_context>
+  <current_date>2026-09-19</current_date>
+  <timezone>Asia/Shanghai</timezone>
+  <filesystem><workspace_roots><root>${root}</root></workspace_roots><permission_profile type="disabled"><file_system type="unrestricted" /></permission_profile></filesystem>
+</environment_context>`;
+
+  function midnightDeltaWire(turnId: string, envelopeXml: string): CodexParsedRequest {
+    const request = currentWire();
+    request._rawBody = {
+      client_metadata: {
+        "x-codex-turn-metadata": JSON.stringify({
+          thread_id: "thread_current",
+          turn_id: turnId,
+          sandbox: "none",
+          workspaces: { [root]: { has_changes: true } },
+        }),
+      },
+      input: [
+        {
+          type: "message",
+          id: "msg_context",
+          role: "user",
+          content: [{ type: "input_text", text: environmentXml }],
+          internal_chat_message_metadata_passthrough: { turn_id: "turn_current" },
+        },
+        {
+          type: "message",
+          id: "msg_active",
+          role: "user",
+          content: [{ type: "input_text", text: "Inspect the workspace" }],
+          internal_chat_message_metadata_passthrough: { turn_id: "turn_current" },
+        },
+        { type: "reasoning", id: `rs_${turnId}`, summary: [], internal_chat_message_metadata_passthrough: { turn_id: turnId } },
+        { type: "function_call", id: `fc_${turnId}`, name: "exec_command", arguments: "{}", call_id: `call_${turnId}`, internal_chat_message_metadata_passthrough: { turn_id: turnId } },
+        { type: "function_call_output", id: `fco_${turnId}`, call_id: `call_${turnId}`, output: "done", internal_chat_message_metadata_passthrough: { turn_id: turnId } },
+        {
+          type: "message",
+          id: "msg_midnight_delta",
+          role: "user",
+          content: [{ type: "input_text", text: envelopeXml }],
+          internal_chat_message_metadata_passthrough: { turn_id: turnId },
+        },
+      ],
+    };
+    return request;
+  }
+
+  test("reuses the thread's cached authority for a date-rollover delta appended mid-turn", () => {
+    const stateRoot = mkdtempSync(join(tmpdir(), "codex-chatgpt-date-rollover-"));
+    temporaryRoots.push(stateRoot);
+    const store = new ChatGptThreadEnvironmentStore(join(stateRoot, "thread-environments.json"));
+    store.resolve(currentWire());
+
+    const rollover = midnightDeltaWire("turn_midnight", dateRolloverEnvironmentXml);
+    const rolloverTools: CodexTool[] = [{ name: "rollover_tool", description: "d", parameters: { type: "object" } }];
+    rollover.context.tools = rolloverTools;
+
+    expect(store.resolve(rollover)).toEqual({
+      cwd: root,
+      roots: [root],
+      writableRoots: [root],
+      sandboxPolicy: { type: "dangerFullAccess" },
+      tools: rolloverTools,
+    });
+  });
+
+  test("recovers a path-less mid-turn delta from the thread's cached authority", () => {
+    const stateRoot = mkdtempSync(join(tmpdir(), "codex-chatgpt-pathless-delta-"));
+    temporaryRoots.push(stateRoot);
+    const store = new ChatGptThreadEnvironmentStore(join(stateRoot, "thread-environments.json"));
+    store.resolve(currentWire());
+
+    // Observed shape: a filesystem delta that names no path at all, only the sandbox profile.
+    const pathless = midnightDeltaWire("turn_pathless", `<environment_context>
+  <current_date>2026-09-19</current_date>
+  <timezone>Asia/Shanghai</timezone>
+  <filesystem><permission_profile type="disabled"><file_system type="unrestricted" /></permission_profile></filesystem>
+</environment_context>`);
+    const pathlessTools: CodexTool[] = [{ name: "pathless_tool", description: "d", parameters: { type: "object" } }];
+    pathless.context.tools = pathlessTools;
+
+    expect(store.resolve(pathless)).toEqual({
+      cwd: root,
+      roots: [root],
+      writableRoots: [root],
+      sandboxPolicy: { type: "dangerFullAccess" },
+      tools: pathlessTools,
+    });
+  });
+
+  test("fails closed for a path-less mid-turn delta when the thread has no cached authority", () => {
+    const store = new ChatGptThreadEnvironmentStore();
+    expect(() => store.resolve(midnightDeltaWire("turn_pathless", `<environment_context>
+  <current_date>2026-09-19</current_date>
+  <timezone>Asia/Shanghai</timezone>
+  <filesystem><permission_profile type="disabled"><file_system type="unrestricted" /></permission_profile></filesystem>
+</environment_context>`))).toThrow("missing cwd");
+  });
+
   test("does not borrow authority across threads or hide an invalid trusted update", () => {
     const store = new ChatGptThreadEnvironmentStore();
     store.resolve(currentWire());
