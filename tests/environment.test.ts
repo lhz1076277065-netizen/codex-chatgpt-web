@@ -611,8 +611,19 @@ describe("trusted Codex task environment continuity", () => {
   <filesystem><workspace_roots><root>${root}</root></workspace_roots><permission_profile type="disabled"><file_system type="unrestricted" /></permission_profile></filesystem>
 </environment_context>`;
 
-  function midnightDeltaWire(turnId: string, envelopeXml: string): CodexParsedRequest {
+  // Production geometry: the turn's own instruction carries the CURRENT turn id, that turn's tool
+  // rounds follow it, and Codex appends the delta last. The failing turn had no start-of-turn
+  // envelope at all — the session holds exactly two environment_context messages: turn one's, and
+  // this midnight delta.
+  function midnightDeltaWire(
+    turnId: string,
+    envelopeXml: string,
+    options: { startEnvelope?: string } = {},
+  ): CodexParsedRequest {
     const request = currentWire();
+    const owned = (id: string) => ({
+      id, internal_chat_message_metadata_passthrough: { turn_id: turnId },
+    });
     request._rawBody = {
       client_metadata: {
         "x-codex-turn-metadata": JSON.stringify({
@@ -623,29 +634,26 @@ describe("trusted Codex task environment continuity", () => {
         }),
       },
       input: [
-        {
+        ...(options.startEnvelope ? [{
           type: "message",
-          id: "msg_context",
+          ...owned("msg_start_context"),
           role: "user",
-          content: [{ type: "input_text", text: environmentXml }],
-          internal_chat_message_metadata_passthrough: { turn_id: "turn_current" },
-        },
+          content: [{ type: "input_text", text: options.startEnvelope }],
+        }] : []),
         {
           type: "message",
-          id: "msg_active",
+          ...owned("msg_active"),
           role: "user",
           content: [{ type: "input_text", text: "Inspect the workspace" }],
-          internal_chat_message_metadata_passthrough: { turn_id: "turn_current" },
         },
-        { type: "reasoning", id: `rs_${turnId}`, summary: [], internal_chat_message_metadata_passthrough: { turn_id: turnId } },
-        { type: "function_call", id: `fc_${turnId}`, name: "exec_command", arguments: "{}", call_id: `call_${turnId}`, internal_chat_message_metadata_passthrough: { turn_id: turnId } },
-        { type: "function_call_output", id: `fco_${turnId}`, call_id: `call_${turnId}`, output: "done", internal_chat_message_metadata_passthrough: { turn_id: turnId } },
+        { type: "reasoning", ...owned(`rs_${turnId}`), summary: [] },
+        { type: "function_call", ...owned(`fc_${turnId}`), name: "exec_command", arguments: "{}", call_id: `call_${turnId}` },
+        { type: "function_call_output", ...owned(`fco_${turnId}`), call_id: `call_${turnId}`, output: "done" },
         {
           type: "message",
-          id: "msg_midnight_delta",
+          ...owned("msg_midnight_delta"),
           role: "user",
           content: [{ type: "input_text", text: envelopeXml }],
-          internal_chat_message_metadata_passthrough: { turn_id: turnId },
         },
       ],
     };
@@ -701,6 +709,43 @@ describe("trusted Codex task environment continuity", () => {
   <current_date>2026-09-19</current_date>
   <timezone>Asia/Shanghai</timezone>
   <filesystem><permission_profile type="disabled"><file_system type="unrestricted" /></permission_profile></filesystem>
+</environment_context>`))).toThrow("missing cwd");
+  });
+
+  test("keeps using the turn's own start envelope when a delta trails its tool rounds", () => {
+    const store = new ChatGptThreadEnvironmentStore();
+    const sameTurn = midnightDeltaWire("turn_same", dateRolloverEnvironmentXml, {
+      startEnvelope: environmentXml,
+    });
+    expect(store.resolve(sameTurn).cwd).toBe(root);
+  });
+
+  // Omitting a cwd says nothing about permissions, so a delta that changes permission semantics in
+  // any way other than restating the cached sandbox mode must still fail closed.
+  test("does not reuse cached full access for a delta that switches to an external profile", () => {
+    const store = new ChatGptThreadEnvironmentStore();
+    store.resolve(currentWire());
+    expect(() => store.resolve(midnightDeltaWire("turn_external", `<environment_context>
+  <current_date>2026-09-19</current_date>
+  <filesystem><permission_profile type="external"><file_system type="external" /></permission_profile></filesystem>
+</environment_context>`))).toThrow("missing cwd");
+  });
+
+  test("does not reuse cached full access for a delta that declares a narrower sandbox", () => {
+    const store = new ChatGptThreadEnvironmentStore();
+    store.resolve(currentWire());
+    expect(() => store.resolve(midnightDeltaWire("turn_narrower", `<environment_context>
+  <current_date>2026-09-19</current_date>
+  <filesystem>${readOnlyProfileXml}</filesystem>
+</environment_context>`))).toThrow("missing cwd");
+  });
+
+  test("does not reuse cached authority for a delta that states no sandbox mode at all", () => {
+    const store = new ChatGptThreadEnvironmentStore();
+    store.resolve(currentWire());
+    expect(() => store.resolve(midnightDeltaWire("turn_no_sandbox", `<environment_context>
+  <current_date>2026-09-19</current_date>
+  <timezone>Asia/Shanghai</timezone>
 </environment_context>`))).toThrow("missing cwd");
   });
 

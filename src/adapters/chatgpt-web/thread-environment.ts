@@ -161,15 +161,16 @@ export class ChatGptThreadEnvironmentStore {
       const currentCompaction = hasCurrentContext && isChatGptCompactionContinuation(parsed);
       const historicalMessages = hasCurrentContext && !currentCompaction && lineage
         ? unattributedChatGptEnvironmentMessages(parsed) : undefined;
-      // A current delta that names no filesystem path at all cannot move, widen or lower authority,
-      // so it is answered with the authority this thread already holds. Any delta that does name a
-      // path, including a malformed or contradictory one, still fails closed on the paths below.
+      // A current delta that names no filesystem path cannot move or widen filesystem authority, so
+      // it is answered with the authority this thread already holds. The delta must still state the
+      // same sandbox mode the cache holds: omitting a cwd says nothing about permissions, so an
+      // unrecognised, absent or changed sandbox declaration keeps failing closed below.
       const authorityForPathlessDelta = (): ChatGptTurnEnvironment | undefined => {
         const delta = pathlessChatGptEnvironmentDelta(parsed);
         if (!delta) return undefined;
         const cached = this.get(threadId);
         if (!cached) return undefined;
-        if (delta.sandboxType && delta.sandboxType !== cached.sandboxPolicy.type) return undefined;
+        if (delta.sandboxType !== cached.sandboxPolicy.type) return undefined;
         return {
           cwd: cached.cwd,
           roots: cached.roots,

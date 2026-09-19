@@ -138,8 +138,8 @@ export interface ChatGptUnattributedEnvironmentMessage {
 }
 
 export interface ChatGptPathlessEnvironmentDelta {
-  /** Sandbox mode the delta declares, when its declarations agree. */
-  sandboxType?: ChatGptSandboxPolicy["type"];
+  /** The single sandbox mode the delta explicitly declares. */
+  sandboxType: ChatGptSandboxPolicy["type"];
 }
 
 /** Envelope texts the wire attributes to the current turn through native item metadata. */
@@ -160,11 +160,14 @@ function currentChatGptEnvironmentUpdateTexts(parsed: CodexParsedRequest): strin
 }
 
 /**
- * A current-turn environment delta that names no filesystem path at all, such as the date, timezone
- * or permission-profile refresh Codex appends mid-turn. Naming no path means it cannot widen, move
- * or lower filesystem authority on its own, so a caller may answer it with authority the thread
- * already holds. Every shape that does declare a cwd or root element returns undefined, including
- * malformed and empty cwd markup, so the existing fail-closed handling stays in charge.
+ * A current-turn environment delta that names no filesystem path at all, such as the date or
+ * timezone refresh Codex appends mid-turn. Naming no path means it cannot widen or move filesystem
+ * authority, so a caller may answer it with authority the thread already holds.
+ *
+ * Omitting a cwd is not evidence that permissions are unchanged: a delta can also declare an
+ * `external` permission profile or otherwise change sandbox semantics. So this requires every
+ * envelope to state one recognized sandbox mode and those statements must agree. An unrecognised,
+ * absent or contradictory sandbox declaration returns undefined and keeps the fail-closed paths.
  */
 export function pathlessChatGptEnvironmentDelta(
   parsed: CodexParsedRequest,
@@ -173,9 +176,10 @@ export function pathlessChatGptEnvironmentDelta(
   if (texts.length === 0) return undefined;
   if (texts.some(text => /<\/?cwd\b/i.test(text) || /<\/?root\b/i.test(text))) return undefined;
   const declared = texts.map(text => sandboxTypeFromEnvironment(text));
-  const known = [...new Set(declared.filter((type): type is ChatGptSandboxPolicy["type"] => type !== undefined))];
-  if (known.length > 1) return undefined;
-  return { sandboxType: known[0] };
+  if (declared.some(type => type === undefined)) return undefined;
+  const known = [...new Set(declared as ChatGptSandboxPolicy["type"][])];
+  if (known.length !== 1) return undefined;
+  return { sandboxType: known[0]! };
 }
 
 /** These are claims to locate in native history, never a source of filesystem authority. */
